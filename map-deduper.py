@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+#
+#    Copyright (C) 2021 Rodrigo Silva (MestreLion) <linux@rodrigosilva.com>
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program. See <http://www.gnu.org/licenses/gpl.html>
+
+"""
+De-duplicate Map items and recover lost ones
+
+https://minecraft.fandom.com/wiki/Map_item_format
+"""
+import logging
+import os.path as osp
+import pathlib
+from pprint import pprint
+import re
+import sys
+
+import mcworldlib as mc
+
+if __name__ == '__main__':
+    myname = osp.basename(osp.splitext(__file__)[0])
+else:
+    myname = __name__
+
+log = logging.getLogger(myname)
+
+
+def parse_args(args=None):
+    parser = mc.basic_parser(description=__doc__)
+    return parser.parse_args(args)
+
+
+def nbt_walk(tag, path=None):
+    """Yield 3-tuples of dot-separated tag paths, tag leaf names and corresponding values"""
+    if isinstance(tag, list):
+        for i, item in enumerate(tag):
+            yield from nbt_walk(item, f"{path}.{i}")
+    elif isinstance(tag, dict):
+        for k, item in tag.items():
+            yield from nbt_walk(item, f"{path}.{k}" if path else k)
+    elif isinstance(tag, (str, int, float)):
+        yield path, path.split('.')[-1], tag
+    elif not isinstance(tag, (mc.nbt.ByteArray, mc.nbt.IntArray, mc.nbt.LongArray)):
+        log.warning("Unexpected tag type in %s=%r: %s", path, tag, type(tag))
+
+
+def match_tag(value, search, exact=False):
+    if value is None:  # Nothing to match
+        return True
+    if isinstance(search, str):
+        if exact:
+            return value.lower() == search.lower()
+        return bool(re.search(value, search, re.IGNORECASE))
+    return type(search)(value) == search  # ints and floats
+
+
+def find_nbt(world: mc.World, args):
+    def match(nbt):
+        for path, name, value in nbt_walk(nbt):
+            if (
+                    match_tag(args.tag_path,  path) and
+                    match_tag(args.tag_name,  name) and
+                    match_tag(args.tag_value, value)
+            ):
+                yield path, value
+
+    for tag_path, tag_value in match(world.level):
+        log.info("%s: %r", tag_path, tag_value)
+
+    for dimension, category, chunk in world.get_all_chunks(progress=(args.loglevel >= logging.INFO)):
+        for tag_path, tag_value in match(chunk):
+            log.info("%s %s R%s, C%s %s: %r",
+                     dimension.name.title(), category.title(),
+                     chunk.region.pos, chunk.pos, tag_path, tag_value)
+
+
+class Map(mc.File):
+    dim_map = {
+        'minecraft:overworld' : mc.Dimension.OVERWORLD,
+        'minecraft:the_nether': mc.Dimension.THE_NETHER,
+        'minecraft:the_end'   : mc.Dimension.THE_END,
+                             0: mc.Dimension.OVERWORLD,
+                            -1: mc.Dimension.THE_NETHER,
+                             1: mc.Dimension.THE_END,
+    }
+
+    @property
+    def data_version(self) -> int:
+        return int(self.root['DataVersion'])
+
+    @property
+    def data(self) -> mc.Compound:
+        return self.root['data']
+
+    @property
+    def mapid(self) -> int:
+        return int(self.filename.stem.split('_')[-1])
+
+    @property
+    def center(self) -> mc.FlatPos:
+        return mc.FlatPos.from_tag(self.data, suffix='Center')
+
+    @property
+    def dimension(self) -> mc.Dimension:
+        return self.dim_map[self.data['dimension']]
+
+    @property
+    def is_explorer(self) -> bool:
+        return self.data['unlimitedTracking'] == 1
+
+    @property
+    def is_treasure(self) -> bool:
+        return self.is_explorer and self.scale == 1
+
+    @property
+    def maptype(self) -> str:
+        return ('Treasure' if self.is_treasure else
+                'Explorer' if self.is_explorer else
+                'Player')
+
+    @property
+    def scale(self) -> int:
+        return int(self.data['scale'])
+
+    @property
+    def key(self) -> tuple:
+        return (
+            self.center,
+            self.is_explorer,
+            self.scale,
+            self.dimension.value,
+        )
+
+    @classmethod
+    def load(cls, *args, **kwargs) -> 'Map':
+        self: 'Map' = super().load(*args, **kwargs)
+        self.filename = pathlib.Path(self.filename)
+        assert self.data['trackingPosition'] == 1
+        return self
+
+    def __eq__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self.key == other.key
+
+    def __lt__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self.mapid < other.mapid
+
+    def __repr__(self):
+        sig = (
+            f"{self.mapid:3}:"
+            f" {self.maptype:8}"
+            f" {self.dimension.name:10} {self.scale} {self.center}"
+        )
+        return f"<Map {sig}>"
+
+    __str__ = __repr__
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    logging.basicConfig(level=args.loglevel, format='%(levelname)s: %(message)s')
+    log.debug(args)
+
+    world = mc.load(args.world)
+
+    maps = {}
+    all_maps = {}
+    for path in pathlib.Path(world.path, 'data').glob("map_*.dat"):
+        mapo = Map.load(path)
+        maps.setdefault(mapo.key, [])
+        maps[mapo.key].append(mapo)
+        all_maps[mapo.mapid] = mapo
+    pprint(all_maps)
+    for key, dupes in maps.items():
+        if len(dupes) > 1:
+            print(key)
+            for dupe in sorted(dupes):
+                print(f"\t{dupe}")
+    return
+
+    # for chunk in world.get_all_chunks():
+    #    pass
+
+
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except mc.MCError as error:
+        log.error(error)
+    except Exception as error:
+        log.critical(error, exc_info=True)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        pass
