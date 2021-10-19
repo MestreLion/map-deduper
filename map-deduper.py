@@ -47,48 +47,36 @@ def parse_args(args=None):
     return parser.parse_args(args)
 
 
-def nbt_walk(tag, path=None):
+def walk_nbt(tag, path=None):
     """Yield 3-tuples of dot-separated tag paths, tag leaf names and corresponding values"""
+    # Tag List
     if isinstance(tag, list):
         for i, item in enumerate(tag):
-            yield from nbt_walk(item, f"{path}.{i}")
+            yield from walk_nbt(item, f"{path}.{i}")
+    # Tag Compound
     elif isinstance(tag, dict):
         for k, item in tag.items():
-            yield from nbt_walk(item, f"{path}.{k}" if path else k)
+            yield from walk_nbt(item, f"{path}.{k}" if path else k)
+    # Leaf values
     elif isinstance(tag, (str, int, float)):
-        yield path, path.split('.')[-1], tag
-    elif not isinstance(tag, (mc.nbt.ByteArray, mc.nbt.IntArray, mc.nbt.LongArray)):
+        path, _, name = path.rpartition('.')
+        yield path, name, tag
+    elif isinstance(tag, (mc.nbt.ByteArray, mc.nbt.IntArray, mc.nbt.LongArray)):
+        pass  # They're HUGE!
+    else:
         log.warning("Unexpected tag type in %s=%r: %s", path, tag, type(tag))
 
 
-def match_tag(value, search, exact=False):
-    if value is None:  # Nothing to match
-        return True
-    if isinstance(search, str):
-        if exact:
-            return value.lower() == search.lower()
-        return bool(re.search(value, search, re.IGNORECASE))
-    return type(search)(value) == search  # ints and floats
+def walk_world(world: mc.World, progress=False):
+    for data in walk_nbt(world.level):
+        yield ("level.dat", *data)
 
-
-def find_nbt(world: mc.World, args):
-    def match(nbt):
-        for path, name, value in nbt_walk(nbt):
-            if (
-                    match_tag(args.tag_path,  path) and
-                    match_tag(args.tag_name,  name) and
-                    match_tag(args.tag_value, value)
-            ):
-                yield path, value
-
-    for tag_path, tag_value in match(world.level):
-        log.info("%s: %r", tag_path, tag_value)
-
-    for dimension, category, chunk in world.get_all_chunks(progress=(args.loglevel >= logging.INFO)):
-        for tag_path, tag_value in match(chunk):
-            log.info("%s %s R%s, C%s %s: %r",
-                     dimension.name.title(), category.title(),
-                     chunk.region.pos, chunk.pos, tag_path, tag_value)
+    for dimension, category, chunk in world.get_all_chunks(progress=progress):
+        for data in walk_nbt(chunk):
+            yield ("/".join((dimension.subfolder(), category, str(chunk.world_pos))), *data)
+        # log.info("%s %s R%s, C%s %s: %r",
+        #         dimension.name.title(), category.title(),
+        #         chunk.region.pos, chunk.pos, data)
 
 
 class Map(mc.File):
