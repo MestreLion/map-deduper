@@ -26,6 +26,7 @@ import pathlib
 from pprint import pprint
 import re
 import sys
+import typing as t
 
 import mcworldlib as mc
 
@@ -35,6 +36,10 @@ else:
     myname = __name__
 
 log = logging.getLogger(myname)
+
+
+def message(*args, **kwargs):
+    print(*args, **kwargs)
 
 
 def parse_args(args=None):
@@ -98,11 +103,11 @@ class Map(mc.File):
 
     @property
     def data_version(self) -> int:
-        return int(self.root['DataVersion'])
+        return int(self['DataVersion'])
 
     @property
     def data(self) -> mc.Compound:
-        return self.root['data']
+        return self['data']
 
     @property
     def mapid(self) -> int:
@@ -178,23 +183,30 @@ def main(argv=None):
 
     world = mc.load(args.world)
 
-    maps = {}
-    all_maps = {}
+    message("\nAll maps:")
+    all_maps: t.Dict[int, Map] = {}
     for path in pathlib.Path(world.path, 'data').glob("map_*.dat"):
         mapo = Map.load(path)
-        maps.setdefault(mapo.key, [])
-        maps[mapo.key].append(mapo)
         all_maps[mapo.mapid] = mapo
-    pprint(all_maps)
-    for key, dupes in maps.items():
-        if len(dupes) > 1:
-            print(key)
-            for dupe in sorted(dupes):
-                print(f"\t{dupe}")
-    return
+    # Sort it once so we don't have to anymore
+    # noinspection PyTypeChecker
+    # https://youtrack.jetbrains.com/issue/PY-27707
+    all_maps = dict(sorted(all_maps.items()))
+    pprint(list(all_maps.values()))
 
-    # for chunk in world.get_all_chunks():
-    #    pass
+    message("\nMap Duplicates:")
+    map_dupes = {}
+    for mapo in sorted(all_maps.values()):
+        map_dupes.setdefault(mapo.key, []).append(mapo)
+    for key, dupes in map_dupes.items():
+        if len(dupes) > 1:
+            message(key)
+            for dupe in sorted(dupes):
+                message(f"\t{dupe}")
+    versions = {}
+
+    message("\nMap Usage:")
+    # for dim, cat, chunk in world.get_all_chunks(): ...
 
 
 
