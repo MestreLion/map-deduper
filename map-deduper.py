@@ -129,18 +129,25 @@ class Map(mc.File):
     @property
     def key(self) -> tuple:
         return (
+            self.dimension.value,
             self.center,
             self.is_explorer,
             self.scale,
-            self.dimension.value,
         )
 
     @classmethod
-    def load(cls, *args, **kwargs) -> 'Map':
-        self: 'Map' = super().load(*args, **kwargs)
+    def load(cls, filename: mc.AnyPath, *args, **kwargs) -> 'Map':
+        self: 'Map' = super().load(filename, *args, **kwargs)
         self.filename = pathlib.Path(self.filename)
         assert self.data['trackingPosition'] == 1
         return self
+
+    @classmethod
+    def load_all(cls, world: mc.World) -> t.Dict[int, 'Map']:
+        maps = [cls.load(path) for path in
+                pathlib.Path(world.path, 'data').glob("map_*.dat")]
+        # Glob doesn't sort properly, so make sure insertion order by Map ID
+        return {item.mapid: item for item in sorted(maps)}
 
     def __eq__(self, other):
         if not isinstance(other, self.__class__):
@@ -171,14 +178,7 @@ def main(argv=None):
     world = mc.load(args.world)
 
     message("\nAll maps:")
-    all_maps: t.Dict[int, Map] = {}
-    for path in pathlib.Path(world.path, 'data').glob("map_*.dat"):
-        mapo = Map.load(path)
-        all_maps[mapo.mapid] = mapo
-    # Sort it once so we don't have to anymore
-    # noinspection PyTypeChecker
-    # https://youtrack.jetbrains.com/issue/PY-27707
-    all_maps = dict(sorted(all_maps.items()))
+    all_maps = Map.load_all(world=world)
     pprint(list(all_maps.values()))
 
     message("\nMap Duplicates:")
