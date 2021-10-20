@@ -24,7 +24,6 @@ import logging
 import os.path as osp
 import pathlib
 from pprint import pprint
-import re
 import sys
 import typing as t
 
@@ -193,8 +192,31 @@ def main(argv=None):
                 message(f"\t{dupe}")
     versions = {}
 
-    message("\nMap Usage:")
-    # for dim, cat, chunk in world.get_all_chunks(): ...
+    message("\nMap Usage: (this might take a VERY long time...)")
+    map_uses = {}
+    map_lost = []
+    try:
+        for path, nbt, name, value in walk_world(world):
+            if not name == 'map':
+                continue
+            map_uses.setdefault(value, []).append((path, nbt))
+            print("\t".join(str(_) for _ in (path, nbt, name, value)))
+    except KeyboardInterrupt:
+        pass
+
+    message("\nMaps Found:")
+    for mapo in all_maps.values():
+        print(mapo)
+        for use in map_uses.get(mapo.mapid, []):
+            text = '\t'.join(use)
+            print(f"\t{text}")
+        if mapo.mapid in map_uses:
+            print()
+        else:
+            map_lost.append(mapo)
+
+    message("\nUnreferenced Maps:")
+    pprint(map_lost)
 
 
 
