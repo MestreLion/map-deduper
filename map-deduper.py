@@ -21,6 +21,7 @@ De-duplicate Map items and recover lost ones
 https://minecraft.fandom.com/wiki/Map_item_format
 """
 import logging
+import os
 import os.path as osp
 import pathlib
 from pprint import pprint
@@ -46,36 +47,70 @@ def parse_args(args=None):
     return parser.parse_args(args)
 
 
-def walk_nbt(tag, path=None):
-    """Yield 3-tuples of dot-separated tag paths, tag leaf names and corresponding values"""
-    # Tag List
-    if isinstance(tag, list):
-        for i, item in enumerate(tag):
-            yield from walk_nbt(item, f"{path}.{i}")
-    # Tag Compound
-    elif isinstance(tag, dict):
-        for k, item in tag.items():
-            yield from walk_nbt(item, f"{path}.{k}" if path else k)
-    # Leaf values
-    elif isinstance(tag, (str, int, float)):
-        path, _, name = path.rpartition('.')
-        yield path, name, tag
-    elif isinstance(tag, (mc.nbt.ByteArray, mc.nbt.IntArray, mc.nbt.LongArray)):
-        pass  # They're HUGE!
+def walk_nbt(root: mc.AnyTag, sort=False, _path: mc.Path = mc.Path()
+             ) -> t.Tuple[mc.Path, t.Union[str, int], mc.AnyTag]:
+    """Yield (path, name/index, tag) for each child of a root tag, recursively.
+
+    The root tag itself is not yielded, and it is only considered a container
+    if it is a Compound, a List of Compounds, or a List of Lists. Any other tag,
+    including Arrays and Lists of other types, are considered leaf tags and not
+    recurred into.
+
+    name is the tag key (or index) location in its (immediate) parent tag, so:
+        parent[name] == tag
+
+    path is the parent tag location in the root tag, compatible with the format
+    described at https://minecraft.fandom.com/wiki/NBT_path_format. So:
+        root[path][name] == root[path[name]] == tag
+    That holds true even when path is empty, i.e., when the parent tag is root.
+    """
+    # TODO: NBTExplorer-like sorting mode:
+    # - Case insensitive sorting on key names
+    # - Compounds first, then Lists (of all types), then leaf values
+    # - For Compounds, Lists and Arrays, include item count
+    items: t.Union[t.Iterable[t.Tuple[str, mc.Compound]],
+                   t.Iterable[t.Tuple[int, mc.List]]]
+
+    if isinstance(root, mc.Compound):
+        items = root.items()
+        if sort:
+            items = sorted(items)
+    elif isinstance(root, mc.List) and root.subtype in (mc.Compound, mc.List):
+        items = enumerate(root)  # always sorted
     else:
-        log.warning("Unexpected tag type in %s=%r: %s", path, tag, type(tag))
+        return
+
+    for name, item in items:
+        yield _path, name, item
+        yield from walk_nbt(item, sort=sort, _path=_path[name])
 
 
-def walk_world(world: mc.World, progress=False):
+def walk_world(world: mc.World, progress=False
+               ) -> t.Tuple[t.Tuple, os.PathLike,
+                            t.Tuple[mc.Path, t.Union[str, int], mc.AnyTag]]:
     for data in walk_nbt(world.level):
-        yield ("level.dat", *data)
+        yield (world.level,), pathlib.Path("level.dat"), data
 
     for dimension, category, chunk in world.get_all_chunks(progress=progress):
+        pos = f"c.{chunk.pos.filepart}@{chunk.world_pos.filepart}"
+        fspath = pathlib.Path(chunk.region.filename, pos).relative_to(world.path)
         for data in walk_nbt(chunk):
-            yield ("/".join((dimension.subfolder(), category, str(chunk.world_pos))), *data)
-        # log.info("%s %s R%s, C%s %s: %r",
-        #         dimension.name.title(), category.title(),
-        #         chunk.region.pos, chunk.pos, data)
+            yield (dimension, category, chunk), fspath, data
+
+
+def map_usage(world):
+    map_uses = {}
+    try:
+        for source, fspath, (nbtpath, name, tag) in walk_world(world):
+            if not name == 'map':
+                continue
+            map_uses.setdefault(tag, []).append((fspath, nbtpath))
+            value = (f"{tag.__class__.__name__}({len(tag)})"
+                     if isinstance(tag, (mc.Compound, mc.List, mc.Array)) else repr(tag))
+            print("\t".join((str(fspath), str(nbtpath), name, value)))
+    except KeyboardInterrupt:
+        pass
+    return map_uses
 
 
 class Map(mc.File):
@@ -192,29 +227,20 @@ def main(argv=None):
                 message(f"\t{dupe}")
     versions = {}
 
-    message("\nMap Usage: (this might take a VERY long time...)")
-    map_uses = {}
-    map_lost = []
-    try:
-        for path, nbt, name, value in walk_world(world):
-            if not name == 'map':
-                continue
-            map_uses.setdefault(value, []).append((path, nbt))
-            print("\t".join(str(_) for _ in (path, nbt, name, value)))
-    except KeyboardInterrupt:
-        pass
+    message("\nMap References: (this might take a VERY long time...)")
+    map_uses = map_usage(world)
 
     message("\nMaps Found:")
+    map_lost = []
     for mapo in all_maps.values():
         print(mapo)
         for use in map_uses.get(mapo.mapid, []):
-            text = '\t'.join(use)
+            text = '\t'.join(map(str, use))
             print(f"\t{text}")
         if mapo.mapid in map_uses:
             print()
         else:
             map_lost.append(mapo)
-
     message("\nUnreferenced Maps:")
     pprint(map_lost)
 
