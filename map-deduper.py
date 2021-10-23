@@ -170,11 +170,6 @@ class Map(mc.File):
         # Glob doesn't sort properly, so make sure insertion order by Map ID
         return {item.mapid: item for item in sorted(maps)}
 
-    def __eq__(self, other):
-        if not isinstance(other, self.__class__):
-            return NotImplemented
-        return self.key == other.key
-
     def __lt__(self, other):
         if not isinstance(other, self.__class__):
             return NotImplemented
