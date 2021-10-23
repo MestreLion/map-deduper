@@ -20,6 +20,7 @@ De-duplicate Map items and recover lost ones
 
 https://minecraft.fandom.com/wiki/Map_item_format
 """
+import argparse
 import logging
 import os.path as osp
 import pathlib
@@ -29,12 +30,8 @@ import typing as t
 
 import mcworldlib as mc
 
-if __name__ == '__main__':
-    myname = osp.basename(osp.splitext(__file__)[0])
-else:
-    myname = __name__
 
-log = logging.getLogger(myname)
+log = logging.getLogger(__name__)
 AllMaps: 't.TypeAlias' = t.Dict[int, 'Map']
 
 
@@ -42,13 +39,43 @@ def message(*args, **kwargs):
     print(*args, **kwargs)
 
 
+# -----------------------------------------------------------------------------
+# CLI functions
+
 def parse_args(args=None):
     parser = mc.basic_parser(description=__doc__)
     commands = parser.add_subparsers(dest='cmd')
-    commands.add_parser('dupes', help="List Map duplicates").set_defaults(f=duplicates)
-    commands.add_parser('refs', help="Find all map references in World").set_defaults(f=map_usage)
-    commands.add_parser('lost', help="Find maps with no reference in World").set_defaults(f=lost_and_found)
+
+    # Frequent subcommand arguments
+    maps = argparse.ArgumentParser(add_help=False)
+    maps.add_argument('maps', nargs='+', type=int)
+
+    commands.add_parser('list',  help="List all maps").set_defaults(f=list_maps)
+    commands.add_parser('show',  help="Print map data", parents=[maps]).set_defaults(f=show_map)
+    commands.add_parser('dupes', help="List map duplicates").set_defaults(f=duplicates)
+    commands.add_parser('refs',  help="Find all references in World").set_defaults(f=map_usage)
+    commands.add_parser('lost',  help="Find maps with no reference").set_defaults(f=lost_and_found)
+    commands.add_parser('merge', help="Merge data from maps", parents=[maps]).set_defaults(f=merge)
+
     return parser.parse_args(args)
+
+
+def list_maps(world: str, **_kw):
+    all_maps = get_all_maps(world)
+    log.info("All maps:")
+    pprint(list(all_maps.values()))
+
+
+def show_map(world: str, maps: list, **_kw):
+    world = mc.load(world)
+    for mapid in maps:
+        try:
+            mapo = Map.load_by_id(mapid, world)
+        except FileNotFoundError as e:
+            log.error("Map %d not found in world %r: %s", mapid, world.name, e)
+            continue
+        log.info("Map %d: %s", mapid, mapo.filename)
+        mc.pretty(mapo)
 
 
 def map_usage(world, _all_maps):
@@ -97,6 +124,17 @@ def duplicates(_world, all_maps: AllMaps):
             message(key)
             for dupe in sorted(dupes):
                 message(f"\t{dupe}")
+
+
+def merge(**args):
+    print(args)
+
+
+# -----------------------------------------------------------------------------
+# Auxiliary functions and class
+
+def get_all_maps(world: str):
+    return Map.load_all(world=mc.load(world))
 
 
 class Map(mc.File):
@@ -164,6 +202,11 @@ class Map(mc.File):
         return self
 
     @classmethod
+    def load_by_id(cls, mapid: int, world: mc.World, *args, **kwargs) -> 'Map':
+        return cls.load(pathlib.Path(world.path, f'data/map_{mapid}.dat'),
+                        *args, **kwargs)
+
+    @classmethod
     def load_all(cls, world: mc.World) -> t.Dict[int, 'Map']:
         maps = [cls.load(path) for path in
                 pathlib.Path(world.path, 'data').glob("map_*.dat")]
@@ -191,18 +234,13 @@ def main(argv=None):
     logging.basicConfig(level=args.loglevel, format='%(levelname)s: %(message)s')
     log.debug(args)
 
-    world = mc.load(args.world)
-
-    message("\nAll maps:")
-    all_maps = Map.load_all(world=world)
-    pprint(list(all_maps.values()))
-
     if args.cmd:
-        args.f(world, all_maps)
+        args.f(**vars(args))
         return
 
 
 if __name__ == "__main__":
+    log = logging.getLogger(osp.basename(osp.splitext(__file__)[0]))
     try:
         sys.exit(main())
     except mc.MCError as error:
