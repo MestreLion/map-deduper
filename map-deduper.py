@@ -35,6 +35,7 @@ else:
     myname = __name__
 
 log = logging.getLogger(myname)
+AllMaps: 't.TypeAlias' = t.Dict[int, 'Map']
 
 
 def message(*args, **kwargs):
@@ -43,10 +44,15 @@ def message(*args, **kwargs):
 
 def parse_args(args=None):
     parser = mc.basic_parser(description=__doc__)
+    commands = parser.add_subparsers(dest='cmd')
+    commands.add_parser('dupes', help="List Map duplicates").set_defaults(f=duplicates)
+    commands.add_parser('refs', help="Find all map references in World").set_defaults(f=map_usage)
+    commands.add_parser('lost', help="Find maps with no reference in World").set_defaults(f=lost_and_found)
     return parser.parse_args(args)
 
 
-def map_usage(world):
+def map_usage(world, _all_maps):
+    message("\nMap References: (this might take a VERY long time...)")
     map_uses = {}
     try:
         for fspath, _, _, (nbtpath, name, tag) in world.walk(progress=True):
@@ -61,14 +67,46 @@ def map_usage(world):
     return map_uses
 
 
+def lost_and_found(world, all_maps: AllMaps, map_uses=None):
+    if map_uses is None:
+        map_uses = map_usage(world, all_maps)
+
+    message("\nMaps Found:")
+    map_lost = []
+    for mapo in all_maps.values():
+        print(mapo)
+        for use in map_uses.get(mapo.mapid, []):
+            text = '\t'.join(map(str, use))
+            print(f"\t{text}")
+        if mapo.mapid in map_uses:
+            print()
+        else:
+            map_lost.append(mapo)
+    message("\nUnreferenced Maps:")
+    pprint(map_lost)
+    return map_uses, map_lost
+
+
+def duplicates(_world, all_maps: AllMaps):
+    message("\nMap Duplicates:")
+    map_dupes = {}
+    for mapo in sorted(all_maps.values()):
+        map_dupes.setdefault(mapo.key, []).append(mapo)
+    for key, dupes in map_dupes.items():
+        if len(dupes) > 1:
+            message(key)
+            for dupe in sorted(dupes):
+                message(f"\t{dupe}")
+
+
 class Map(mc.File):
     dim_map = {
-        'minecraft:overworld' : mc.Dimension.OVERWORLD,
-        'minecraft:the_nether': mc.Dimension.THE_NETHER,
-        'minecraft:the_end'   : mc.Dimension.THE_END,
-                             0: mc.Dimension.OVERWORLD,
-                            -1: mc.Dimension.THE_NETHER,
-                             1: mc.Dimension.THE_END,
+        'minecraft:overworld' : mc.OVERWORLD,
+        'minecraft:the_nether': mc.THE_NETHER,
+        'minecraft:the_end'   : mc.THE_END,
+                             0: mc.OVERWORLD,
+                            -1: mc.THE_NETHER,
+                             1: mc.THE_END,
     }
 
     @property
@@ -164,35 +202,9 @@ def main(argv=None):
     all_maps = Map.load_all(world=world)
     pprint(list(all_maps.values()))
 
-    message("\nMap Duplicates:")
-    map_dupes = {}
-    for mapo in sorted(all_maps.values()):
-        map_dupes.setdefault(mapo.key, []).append(mapo)
-    for key, dupes in map_dupes.items():
-        if len(dupes) > 1:
-            message(key)
-            for dupe in sorted(dupes):
-                message(f"\t{dupe}")
-    versions = {}
-
-    message("\nMap References: (this might take a VERY long time...)")
-    map_uses = map_usage(world)
-
-    message("\nMaps Found:")
-    map_lost = []
-    for mapo in all_maps.values():
-        print(mapo)
-        for use in map_uses.get(mapo.mapid, []):
-            text = '\t'.join(map(str, use))
-            print(f"\t{text}")
-        if mapo.mapid in map_uses:
-            print()
-        else:
-            map_lost.append(mapo)
-    message("\nUnreferenced Maps:")
-    pprint(map_lost)
-
-
+    if args.cmd:
+        args.f(world, all_maps)
+        return
 
 
 if __name__ == "__main__":
