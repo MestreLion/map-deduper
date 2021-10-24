@@ -30,6 +30,8 @@ import typing as t
 
 import mcworldlib as mc
 
+if t.TYPE_CHECKING:
+    import os
 
 log = logging.getLogger(__name__)
 AllMaps: 't.TypeAlias' = t.Dict[int, 'Map']
@@ -50,75 +52,62 @@ def parse_args(args=None):
     maps = argparse.ArgumentParser(add_help=False)
     maps.add_argument('maps', nargs='+', type=int)
 
-    commands.add_parser('list',  help="List all maps").set_defaults(f=list_maps)
-    commands.add_parser('show',  help="Print map data", parents=[maps]).set_defaults(f=show_map)
-    commands.add_parser('dupes', help="List map duplicates").set_defaults(f=duplicates)
-    commands.add_parser('refs',  help="Find all references in World").set_defaults(f=map_usage)
-    commands.add_parser('lost',  help="Find maps with no reference").set_defaults(f=lost_and_found)
-    commands.add_parser('merge', help="Merge data from maps", parents=[maps]).set_defaults(f=merge)
+    commands.add_parser('list',   help="List all maps").set_defaults(f=list_maps)
+    commands.add_parser('show',   help="Print map data", parents=[maps]).set_defaults(f=show_maps)
+    commands.add_parser('search', help="Search all map references").set_defaults(f=search_maps)
+    commands.add_parser('lost',   help="Find maps with no reference").set_defaults(f=lost_maps)
+    commands.add_parser('dupes',  help="List map duplicates").set_defaults(f=duplicates)
+    commands.add_parser('merge',  help="Merge data from maps", parents=[maps]).set_defaults(f=merge)
 
     return parser.parse_args(args)
 
 
-def list_maps(world: str, **_kw):
-    all_maps = get_all_maps(world)
+def list_maps(world: str, _all_maps=None, **_kw):
+    all_maps = get_all_maps(world) if _all_maps is None else _all_maps
     log.info("All maps:")
     pprint(list(all_maps.values()))
 
 
-def show_map(world: str, maps: list, **_kw):
+def show_maps(world: str, maps: list, **_kw):
     world = mc.load(world)
     for mapid in maps:
         try:
-            mapo = Map.load_by_id(mapid, world)
+            mapitem = Map.load_by_id(mapid, world)
         except FileNotFoundError as e:
             log.error("Map %d not found in world %r: %s", mapid, world.name, e)
             continue
-        log.info("Map %d: %s", mapid, mapo.filename)
-        mc.pretty(mapo)
+        log.info("Map %d: %s", mapid, mapitem.filename)
+        mc.pretty(mapitem)
 
 
-def map_usage(world, _all_maps):
-    message("\nMap References: (this might take a VERY long time...)")
-    map_uses = {}
-    try:
-        for fspath, _, _, (nbtpath, name, tag) in world.walk(progress=True):
-            if not name == 'map':
-                continue
-            map_uses.setdefault(tag, []).append((fspath, nbtpath))
-            value = (f"{tag.__class__.__name__}({len(tag)})"
-                     if isinstance(tag, (mc.Compound, mc.List, mc.Array)) else repr(tag))
-            print("\t".join((str(fspath), str(nbtpath), name, value)))
-    except KeyboardInterrupt:
-        pass
-    return map_uses
-
-
-def lost_and_found(world, all_maps: AllMaps, map_uses=None):
-    if map_uses is None:
-        map_uses = map_usage(world, all_maps)
-
-    message("\nMaps Found:")
-    map_lost = []
-    for mapo in all_maps.values():
-        print(mapo)
-        for use in map_uses.get(mapo.mapid, []):
-            text = '\t'.join(map(str, use))
-            print(f"\t{text}")
-        if mapo.mapid in map_uses:
+def search_maps(world: str, _all_maps=None, _map_refs=None, **_kw):
+    world = mc.load(world)
+    all_maps = Map.load_all(world) if _all_maps is None else _all_maps
+    map_refs = get_map_refs(world) if _map_refs is None else _map_refs
+    log.info("Map references:")
+    for mapitem in all_maps.values():
+        print(mapitem)
+        for fs, _, nbt in map_refs.get(mapitem.mapid, []):
+            print(f"\t{fs}\t{nbt}")
+        if mapitem.mapid in map_refs:
             print()
-        else:
-            map_lost.append(mapo)
-    message("\nUnreferenced Maps:")
+
+
+def lost_maps(world: str, _all_maps=None, _map_refs=None, **_kw):
+    world = mc.load(world)
+    all_maps = Map.load_all(world) if _all_maps is None else _all_maps
+    map_refs = get_map_refs(world) if _map_refs is None else _map_refs
+    map_lost = [all_maps[mapid] for mapid in all_maps if mapid not in map_refs]
+    log.info("Lost maps:")
     pprint(map_lost)
-    return map_uses, map_lost
 
 
-def duplicates(_world, all_maps: AllMaps):
-    message("\nMap Duplicates:")
+def duplicates(world: str, _all_maps=None, _map_refs=None, **_kw):
+    all_maps = get_all_maps(world) if _all_maps is None else _all_maps
     map_dupes = {}
-    for mapo in sorted(all_maps.values()):
-        map_dupes.setdefault(mapo.key, []).append(mapo)
+    log.info("Map Duplicates:")
+    for mapitem in all_maps.values():
+        map_dupes.setdefault(mapitem.key, []).append(mapitem)
     for key, dupes in map_dupes.items():
         if len(dupes) > 1:
             message(key)
@@ -126,8 +115,8 @@ def duplicates(_world, all_maps: AllMaps):
                 message(f"\t{dupe}")
 
 
-def merge(**args):
-    print(args)
+def merge(world: str, maps: list, **_kw):
+    print((world, maps))
 
 
 # -----------------------------------------------------------------------------
@@ -135,6 +124,25 @@ def merge(**args):
 
 def get_all_maps(world: str):
     return Map.load_all(world=mc.load(world))
+
+
+def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple[os.PathLike, mc.Root, mc.Path]]:
+    # Theoretically, tag type is mc.AnyTag, but as we're filtering name == "map",
+    # then we know it'll only be mc.Int, as tag == mapid
+    log.info("Searching Map references in %r, this might take a VERY long time...",
+             world.name)
+    refs = {}
+    try:
+        for fspath, _, root, (nbtpath, name, tag) in world.walk(progress=True):
+            if not name == 'map':
+                continue
+            refs.setdefault(int(tag), []).append((fspath, root, nbtpath[name]))
+            log.debug("%s\t%s\t%s\t%r", fspath, nbtpath, name, tag)
+    except KeyboardInterrupt:
+        pass
+    log.info("References found: %d",
+             sum(len(_) for _ in refs.values()))
+    return refs
 
 
 class Map(mc.File):
