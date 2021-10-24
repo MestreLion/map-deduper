@@ -22,7 +22,6 @@ https://minecraft.fandom.com/wiki/Map_item_format
 """
 import argparse
 import logging
-import os.path as osp
 import pathlib
 from pprint import pprint
 import sys
@@ -73,8 +72,8 @@ def show_maps(world: str, maps: list, **_kw):
     for mapid in maps:
         try:
             mapitem = Map.load_by_id(mapid, world)
-        except FileNotFoundError as e:
-            log.error("Map %d not found in world %r: %s", mapid, world.name, e)
+        except mc.MCError as e:
+            log.error(e)
             continue
         log.info("Map %d: %s", mapid, mapitem.filename)
         mc.pretty(mapitem)
@@ -126,7 +125,7 @@ def get_all_maps(world: str):
     return Map.load_all(world=mc.load(world))
 
 
-def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple[os.PathLike, mc.Root, mc.Path]]:
+def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple['os.PathLike', mc.Root, mc.Path]]:
     # Theoretically, tag type is mc.AnyTag, but as we're filtering name == "map",
     # then we know it'll only be mc.Int, as tag == mapid
     log.info("Searching Map references in %r, this might take a VERY long time...",
@@ -211,8 +210,12 @@ class Map(mc.File):
 
     @classmethod
     def load_by_id(cls, mapid: int, world: mc.World, *args, **kwargs) -> 'Map':
-        return cls.load(pathlib.Path(world.path, f'data/map_{mapid}.dat'),
-                        *args, **kwargs)
+        try:
+            return cls.load(pathlib.Path(world.path, f'data/map_{mapid}.dat'),
+                            *args, **kwargs)
+        except FileNotFoundError as e:
+            raise mc.MCError(f"Map {mapid} not found in world {world.name!r}: {e}")
+
 
     @classmethod
     def load_all(cls, world: mc.World) -> t.Dict[int, 'Map']:
@@ -248,7 +251,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    log = logging.getLogger(osp.basename(osp.splitext(__file__)[0]))
+    log = logging.getLogger(pathlib.Path(__file__).stem)
     try:
         sys.exit(main())
     except mc.MCError as error:
