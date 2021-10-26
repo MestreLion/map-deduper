@@ -43,6 +43,16 @@ def message(*args, **kwargs):
 # -----------------------------------------------------------------------------
 # CLI functions
 
+def main(argv=None):
+    args = parse_args(argv)
+    logging.basicConfig(level=args.loglevel, format='%(levelname)s: %(message)s')
+    log.debug(args)
+
+    if args.cmd:
+        args.f(**vars(args))
+        return
+
+
 def parse_args(args=None):
     parser = mc.basic_parser(description=__doc__)
     commands = parser.add_subparsers(dest='cmd')
@@ -119,24 +129,6 @@ def duplicates(world: str, _all_maps=None, _map_refs=None, **_kw):
                 message(f"\t{dupe}")
 
 
-# Plan:
-# Merge 115 into 114, 113 in 112, 111 in 110, 109 in 108
-# Delete 115, 113, 111, 109
-# Move 110 to 109, 112 to 110, 114 to 111 - no ref
-# move 116 to 112, 117 to 113
-# update refs 116 to 112, 117 to 113
-# update idcounts.dat to 114
-#
-# - Find dupes
-# 	- Merge with highest DataValue, lowest ID
-# - Find clones
-# 	- Update references to lowest ID
-# - Find lost with clones
-# 	- delete
-# - get missing
-# 	- move next -> missing
-# 	- update refs
-
 def merge(world: str, mapid: int, maps: t.List[int], **_kw):
     world = mc.load(world)
     target = Map.load_by_id(mapid, world)
@@ -150,114 +142,8 @@ def merge(world: str, mapid: int, maps: t.List[int], **_kw):
         # update references in world: source -> target
 
 
-def merge_map(source: 'Map', target: 'Map'):
-    diffs = get_map_diffs(source, target)
-
-    if not diffs:
-        print("Maps are absolutely identical!")
-        assert source == target
-        return
-
-    changes: t.List[t.Tuple[int, mc.Byte]] = []
-    for diff in diffs:
-        source, path, key, container, src, tag, category, a, kw = diff
-        path: mc.Path
-        if not category == "value":
-            raise mc.MCError("Maps %s and %s can't be merged: %s",
-                             source.mapid, target.mapid, show_diff(diff))
-
-        if path[key] == mc.Path("DataVersion"):
-            if not tag >= src:
-                raise mc.MCError("Maps %s and %s can't be merged, target DataVersion"
-                                 " must be at least equal to source's: %s < %s [%s",
-                                 source.mapid, target.mapid, tag, src, show_diff(diff))
-            continue
-
-        if not path == mc.Path("data.colors"):
-            raise mc.MCError("Maps %s and %s can't be merged, they must diverge"
-                             " only on colors data: %s",
-                             source.mapid, target.mapid, show_diff(diff))
-
-        if src == 0:
-            continue
-
-        if not tag == 0:
-            raise mc.MCError("Maps %s and %s can't be merged, conflicting values"
-                             " for the same color index: %s",
-                             source.mapid, target.mapid, show_diff(diff))
-
-        changes.append((key, src))
-
-
-    if not changes:
-        print("nothing to do!")
-        for c in source[mc.Path("data.colors")]:
-            if c != 0:
-                raise Exception("pqp")
-
-    pprint(changes)
-    print("So far so good")
-    return
-
-
-
-def get_map_diffs(source: 'Map', target: 'Map'):
-    def add_diff(category, *a, **kw):
-        diffs.append((source, path, key, container, src, tag, category, a, kw))
-    diffs = []
-    for data in mc.deep_walk(source):
-        src, path, key, _, _, container = data[:6]
-        tag = None
-        if path[key] not in target:
-            add_diff("missing")
-            continue
-        tag = target[path][key]
-        if not type(tag) == type(src):
-            add_diff("type")
-            continue
-        if container:
-            if not len(tag) == len(src):
-                add_diff("length")
-                continue
-        else:
-            if not tag == src:
-                add_diff("value")
-                continue
-    return diffs
-
-
-def show_diff(diff):
-    source, path, key, container, src, tag, category, a, kw = diff
-    return (category, source.mapid, path, key,
-            (len(src), len(tag)) if container else (src, tag),
-            a, kw)
-
-
 # -----------------------------------------------------------------------------
-# Auxiliary functions and class
-
-def get_all_maps(world: str):
-    return Map.load_all(world=mc.load(world))
-
-
-def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple['os.PathLike', mc.Root, mc.Path]]:
-    # Theoretically, tag type is mc.AnyTag, but as we're filtering name == "map",
-    # then we know it'll only be mc.Int, as tag == mapid
-    log.info("Searching Map references in %r, this might take a VERY long time...",
-             world.name)
-    refs = {}
-    try:
-        for fspath, _, root, (tag, nbtpath, name, _) in world.walk(progress=True):
-            if not name == 'map':
-                continue
-            refs.setdefault(int(tag), []).append((fspath, root, nbtpath[name]))
-            log.debug("%s\t%s\t%s\t%r", fspath, nbtpath, name, tag)
-    except KeyboardInterrupt:
-        pass
-    log.info("References found: %d",
-             sum(len(_) for _ in refs.values()))
-    return refs
-
+# Main classes
 
 class Map(mc.File):
     dim_map = {
@@ -355,17 +241,132 @@ class Map(mc.File):
     __str__ = __repr__
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    logging.basicConfig(level=args.loglevel, format='%(levelname)s: %(message)s')
-    log.debug(args)
+# -----------------------------------------------------------------------------
+# Auxiliary and Business logic functions
 
-    if args.cmd:
-        args.f(**vars(args))
+def get_all_maps(world: str):
+    return Map.load_all(world=mc.load(world))
+
+
+def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple['os.PathLike', mc.Root, mc.Path]]:
+    # Theoretically, tag type is mc.AnyTag, but as we're filtering name == "map",
+    # then we know it'll only be mc.Int, as tag == mapid
+    log.info("Searching Map references in %r, this might take a VERY long time...",
+             world.name)
+    refs = {}
+    try:
+        for fspath, _, root, (tag, nbtpath, name, _) in world.walk(progress=True):
+            if not name == 'map':
+                continue
+            refs.setdefault(int(tag), []).append((fspath, root, nbtpath[name]))
+            log.debug("%s\t%s\t%s\t%r", fspath, nbtpath, name, tag)
+    except KeyboardInterrupt:
+        pass
+    log.info("References found: %d",
+             sum(len(_) for _ in refs.values()))
+    return refs
+
+
+def merge_map(source: 'Map', target: 'Map'):
+    diffs = get_map_diffs(source, target)
+
+    if not diffs:
+        print("Maps are absolutely identical!")
+        assert source == target
         return
 
+    changes: t.List[t.Tuple[int, mc.Byte]] = []
+    for diff in diffs:
+        source, path, key, container, src, tag, category, a, kw = diff
+        path: mc.Path
+        if not category == "value":
+            raise mc.MCError("Maps %s and %s can't be merged: %s",
+                             source.mapid, target.mapid, show_diff(diff))
+
+        if path[key] == mc.Path("DataVersion"):
+            if not tag >= src:
+                raise mc.MCError("Maps %s and %s can't be merged, target DataVersion"
+                                 " must be at least equal to source's: %s < %s [%s",
+                                 source.mapid, target.mapid, tag, src, show_diff(diff))
+            continue
+
+        if not path == mc.Path("data.colors"):
+            raise mc.MCError("Maps %s and %s can't be merged, they must diverge"
+                             " only on colors data: %s",
+                             source.mapid, target.mapid, show_diff(diff))
+
+        if src == 0:
+            continue
+
+        if not tag == 0:
+            raise mc.MCError("Maps %s and %s can't be merged, conflicting values"
+                             " for the same color index: %s",
+                             source.mapid, target.mapid, show_diff(diff))
+
+        changes.append((key, src))
 
 
+    if not changes:
+        print("nothing to do!")
+        for c in source[mc.Path("data.colors")]:
+            if c != 0:
+                raise Exception("pqp")
+
+    pprint(changes)
+    print("So far so good")
+    return
+
+
+
+def get_map_diffs(source: 'Map', target: 'Map'):
+    def add_diff(category, *a, **kw):
+        diffs.append((source, path, key, container, src, tag, category, a, kw))
+    diffs = []
+    for data in mc.deep_walk(source):
+        src, path, key, _, _, container = data[:6]
+        tag = None
+        if path[key] not in target:
+            add_diff("missing")
+            continue
+        tag = target[path][key]
+        if not type(tag) == type(src):
+            add_diff("type")
+            continue
+        if container:
+            if not len(tag) == len(src):
+                add_diff("length")
+                continue
+        else:
+            if not tag == src:
+                add_diff("value")
+                continue
+    return diffs
+
+
+def show_diff(diff):
+    source, path, key, container, src, tag, category, a, kw = diff
+    return (category, source.mapid, path, key,
+            (len(src), len(tag)) if container else (src, tag),
+            a, kw)
+
+
+# Plan:
+# Merge 115 into 114, 113 in 112, 111 in 110, 109 in 108
+# Delete 115, 113, 111, 109
+# Move 110 to 109, 112 to 110, 114 to 111 - no ref
+# move 116 to 112, 117 to 113
+# update refs 116 to 112, 117 to 113
+# update idcounts.dat to 114
+#
+# - Find dupes
+# 	- Merge with highest DataValue, lowest ID
+# - Find clones
+# 	- Update references to lowest ID
+# - Find lost with referenced clones
+# 	- delete
+# - get missing
+# 	- move next -> missing
+# 	- update refs
 
 if __name__ == "__main__":
     log = logging.getLogger(pathlib.Path(__file__).stem)
