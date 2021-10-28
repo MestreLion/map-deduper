@@ -36,10 +36,6 @@ log = logging.getLogger(__name__)
 AllMaps: 't.TypeAlias' = t.Dict[int, 'Map']
 
 
-def message(*args, **kwargs):
-    print(*args, **kwargs)
-
-
 # -----------------------------------------------------------------------------
 # CLI functions
 
@@ -69,7 +65,7 @@ def parse_args(args=None):
     commands.add_parser('show',   help="Print map data", parents=[maps]).set_defaults(f=show_maps)
     commands.add_parser('search', help="Search all map references").set_defaults(f=search_maps)
     commands.add_parser('lost',   help="Find maps with no reference").set_defaults(f=lost_maps)
-    commands.add_parser('dupes',  help="List map duplicates").set_defaults(f=duplicates)
+    commands.add_parser('dupes',  help="List map duplicates").set_defaults(f=print_dupes)
     commands.add_parser('merge',  help="Merge into a target map data from other maps",
                         parents=[mapid, maps]).set_defaults(f=merge)
 
@@ -116,17 +112,13 @@ def lost_maps(world: str, _all_maps=None, _map_refs=None, **_kw):
     pprint(map_lost)
 
 
-def duplicates(world: str, _all_maps=None, _map_refs=None, **_kw):
-    all_maps = get_all_maps(world) if _all_maps is None else _all_maps
-    map_dupes = {}
+def print_dupes(world: str, _dupes_map=None, **_kw):
+    dupes_map = get_duplicates(get_all_maps(world)) if _dupes_map is None else _dupes_map
     log.info("Map Duplicates:")
-    for mapitem in all_maps.values():
-        map_dupes.setdefault(mapitem.key, []).append(mapitem)
-    for key, dupes in map_dupes.items():
-        if len(dupes) > 1:
-            message(key)
-            for dupe in sorted(dupes):
-                message(f"\t{dupe}")
+    for key, dupes in dupes_map:
+        print(key)
+        for dupe in sorted(dupes):
+            print(f"\t{dupe}")
 
 
 def merge(world: str, mapid: int, maps: t.List[int], **_kw):
@@ -259,7 +251,6 @@ class TagDiff(t.NamedTuple):
     target:   DiffValue   # Diff value in in target
 
 
-
 # -----------------------------------------------------------------------------
 # Auxiliary and Business logic functions
 
@@ -358,6 +349,14 @@ def get_map_diffs(source: Map, target: Map):
                 yield add_diff("value", src, tag)
                 continue
 
+
+def get_duplicates(all_maps: t.Dict[int, Map]) -> t.Iterator[t.Tuple[t.Tuple, t.List[Map]]]:
+    map_dupes = {}
+    for mapitem in all_maps.values():
+        map_dupes.setdefault(mapitem.key, []).append(mapitem)
+    for key, dupes in map_dupes.items():
+        if len(dupes) > 1:
+            yield key, dupes
 
 # Plan:
 # Merge 115 into 114, 113 in 112, 111 in 110, 109 in 108
