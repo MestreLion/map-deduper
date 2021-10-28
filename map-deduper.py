@@ -68,13 +68,14 @@ def parse_args(args=None):
     commands.add_parser('dupes',  help="List map duplicates").set_defaults(f=print_dupes)
     commands.add_parser('merge',  help="Merge into a target map data from other maps",
                         parents=[mapid, maps]).set_defaults(f=merge)
+    commands.add_parser('dedupe', help="De-duplicate all maps in world").set_defaults(f=dedupe)
 
     return parser.parse_args(args)
 
 
-def list_maps(world: str, _all_maps=None, **_kw):
+def list_maps(world: str, _all_maps=None, _label="", **_kw):
     all_maps = get_all_maps(world) if _all_maps is None else _all_maps
-    log.info("All maps:")
+    log.info("%s maps:", _label or "All")
     pprint(list(all_maps.values()))
 
 
@@ -113,9 +114,11 @@ def lost_maps(world: str, _all_maps=None, _map_refs=None, **_kw):
 
 
 def print_dupes(world: str, _dupes_map=None, **_kw):
-    dupes_map = get_duplicates(get_all_maps(world)) if _dupes_map is None else _dupes_map
+    dupes_map = _dupes_map
+    if dupes_map is None:
+        dupes_map = dict(get_duplicates(get_all_maps(world)))
     log.info("Map Duplicates:")
-    for key, dupes in dupes_map:
+    for key, dupes in dupes_map.items():
         print(key)
         for dupe in sorted(dupes):
             print(f"\t{dupe}")
@@ -132,6 +135,36 @@ def merge(world: str, mapid: int, maps: t.List[int], **_kw):
     for source in sources:
         merge_map(source, target)  # raise if too different
         # update references in world: source -> target
+
+
+# Plan:
+# Merge 115 into 114, 113 in 112, 111 in 110, 109 in 108
+# Delete 115, 113, 111, 109
+# Move 110 to 109, 112 to 110, 114 to 111 - no ref
+# move 116 to 112, 117 to 113
+# update refs 116 to 112, 117 to 113
+# update idcounts.dat to 114
+def dedupe(world: str, **_kw):
+    world = mc.load(world)
+    log.info("De-duplicating Player maps in World %r", world.name)
+    all_maps = {k: v for k, v in Map.load_all(world).items() if v.is_player}
+    list_maps("", _all_maps=all_maps, _label="Player")
+    dupes_map = dict(get_duplicates(all_maps))
+    print_dupes("", _dupes_map=dupes_map)
+    for dupes in dupes_map.items():
+        log.info("De-duplicating maps:")
+        pprint(dupes)
+        # choose target: highest DataValue, highest num references, lowest ID
+        # yield (target, source, changes, is_mergeable)
+    # refs = get_map_refs(world)
+    # lost = [all_maps[mapid] for mapid in all_maps if mapid not in refs]
+    # for each lost, mergeable source
+        # merge (apply changes)
+        # delete
+    # read idcounts and get missing maps
+        # move next -> missing
+        # update refs
+    # update idcounts
 
 
 # -----------------------------------------------------------------------------
@@ -379,23 +412,6 @@ def get_duplicates(all_maps: t.Dict[int, Map]) -> t.Iterator[t.Tuple[t.Tuple, t.
         if len(dupes) > 1:
             yield key, dupes
 
-# Plan:
-# Merge 115 into 114, 113 in 112, 111 in 110, 109 in 108
-# Delete 115, 113, 111, 109
-# Move 110 to 109, 112 to 110, 114 to 111 - no ref
-# move 116 to 112, 117 to 113
-# update refs 116 to 112, 117 to 113
-# update idcounts.dat to 114
-#
-# - Find dupes
-# 	- Merge with highest DataValue, lowest ID
-# - Find clones
-# 	- Update references to lowest ID
-# - Find lost with referenced clones
-# 	- delete
-# - get missing
-# 	- move next -> missing
-# 	- update refs
 
 if __name__ == "__main__":
     log = logging.getLogger(pathlib.Path(__file__).stem)
