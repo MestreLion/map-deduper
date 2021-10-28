@@ -144,27 +144,48 @@ def merge(world: str, mapid: int, maps: t.List[int], **_kw):
 # move 116 to 112, 117 to 113
 # update refs 116 to 112, 117 to 113
 # update idcounts.dat to 114
-def dedupe(world: str, **_kw):
+def dedupe(world: str, **_kw) -> None:
+    """De-duplicate maps list by merging pixels and removing unreferenced maps
+
+    - For each set of duplicates, choose a suitable target and candidate sources
+    - Sources are suitable candidates for merging pixels if:
+        - Unreferenced (lost) in World
+        - No difference to its target besides pixels and lower or equal DataValue
+        - No conflicting pixels*
+    - Merge pixels in targets and delete sources that applied
+    - "Defragmentate" maps list:
+        - Find all missing map files according to idcounts.dat
+        - For each missing, move next (if any) and update its references (if any)
+        - Update final idcounts.dat
+    """
+    # Find Duplicates
     world = mc.load(world)
     log.info("De-duplicating Player maps in World %r", world.name)
     all_maps = {k: v for k, v in Map.load_all(world).items() if v.is_player}
     list_maps("", _all_maps=all_maps, _label="Player")
     dupes_map = dict(get_duplicates(all_maps))
-    print_dupes("", _dupes_map=dupes_map)
-    for dupes in dupes_map.items():
-        log.info("De-duplicating maps:")
-        pprint(dupes)
-        # choose target: highest DataValue, highest num references, lowest ID
-        # yield (target, source, changes, is_mergeable)
-    # refs = get_map_refs(world)
-    # lost = [all_maps[mapid] for mapid in all_maps if mapid not in refs]
-    # for each lost, mergeable source
-        # merge (apply changes)
-        # delete
-    # read idcounts and get missing maps
-        # move next -> missing
-        # update refs
-    # update idcounts
+    if dupes_map:
+        print_dupes("", _dupes_map=dupes_map)
+    else:
+        log.info("No duplicate maps!")
+        return
+
+    # Choose Target and Candidates
+    sources : t.Dict[int, t.Tuple[Map, Map, t.List[MapPixel]]] = {}
+    for dupes in dupes_map.values():
+        dupes.sort(key=lambda _: (_.data_version, -_.mapid))
+        target, candidates = dupes.pop(), dupes
+        log.debug("Target %s, candidates: %s", target, candidates)
+        for source in candidates:
+            assert source.mapid not in sources
+            mergeable, pixels = can_merge(source, target)
+            if mergeable:
+                sources[source.mapid] = source, target, pixels
+    pprint(sources)
+
+    refs = get_map_refs(world)
+    lost = [all_maps[mapid] for mapid in all_maps if mapid not in refs]
+    ...
 
 
 # -----------------------------------------------------------------------------
@@ -287,9 +308,10 @@ class Map(mc.File):
     __str__ = __repr__
 
 
+MapPixel: 't.TypeAlias' = t.Tuple[int, mc.Byte]  # Index, Value in 'data.colors'
 DiffValue: 't.TypeAlias' = t.Union[
     # Actual type depends on category
-    mc.TagKey,  # missing
+    None,       # missing key
     t.Type,     # type
     int,        # length
     mc.AnyTag,  # value
@@ -332,8 +354,64 @@ def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple['os.PathLike', mc.Root,
 
 
 def merge_map(source: Map, target: Map):
+    changes, diffs = get_pixels_to_apply(source, target)
+    if not diffs:
+        log.info("Maps %s and %s are absolutely identical!",
+                 source.mapid, target.mapid)
+        assert source == target
+        return
+
+    if not changes:
+        log.info("%s differences from %s, but no changes required in %s",
+                 diffs, source.mapid, target.mapid)
+        assert not any(source[mc.Path("data.colors")])
+        return
+
+    log.info("%s differences from %s, %s changes required in %s",
+             diffs, len(changes), source.mapid, target.mapid)
+    pprint(changes)
+    apply_pixels(target, changes)
+
+
+def get_map_diffs(source: Map, target: Map) -> t.Iterator[TagDiff]:
+    def evaluate(data: mc.FQTag) -> t.Tuple[str, DiffValue, DiffValue]:
+        src = data.tag  # source
+        if data.path[data.key] not in target:
+            # If container, should prune its whole subtree
+            return "missing", None, None
+        tag = target[data.path][data.key]  # target
+        if not type(tag) == type(src):
+            return "type", type(src), type(tag)
+        if data.is_container:
+            if not len(tag) == len(src):
+                return "length", len(src), len(tag)
+        else:
+            if not tag == src:
+                return "value", src, tag
+        return "", None, None
+    for full_tag in mc.deep_walk(source):
+        category, source_value, target_value = evaluate(full_tag)
+        if category:
+            yield TagDiff(
+                category = category,
+                path     = full_tag.path,
+                key      = full_tag.key,
+                source   = source_value,
+                target   = target_value,
+            )
+
+
+def can_merge(source: Map, target: Map) -> t.Tuple[bool, t.List[MapPixel]]:
+    try:
+        return True, get_pixels_to_apply(source, target)[0]
+    except mc.MCError as e:
+        log.info(e)  # debug
+        return False, []
+
+
+def get_pixels_to_apply(source: Map, target: Map) -> t.Tuple[t.List[MapPixel], int]:
     i = 0
-    changes: t.List[t.Tuple[int, mc.Byte]] = []
+    pixels: t.List[MapPixel] = []
     for i, diff in enumerate(get_map_diffs(source, target), 1):
         if not diff.category == "value":
             raise mc.MCError("Maps %s and %s can't be merged: %s",
@@ -359,52 +437,16 @@ def merge_map(source: Map, target: Map):
                              " for the same color index: %s",
                              source.mapid, target.mapid, diff)
 
-        changes.append((diff.key, diff.source))
+        pixels.append((diff.key, diff.source))
 
-    if not i:
-        log.info("Maps %s and %s are absolutely identical!",
-                 source.mapid, target.mapid)
-        assert source == target
-        return
+    return pixels, i
 
-    if not changes:
-        log.info("%s differences from %s, but no changes required in %s",
-                 i, source.mapid, target.mapid)
-        assert not any(source[mc.Path("data.colors")])
-        return
 
-    log.info("%s differences from %s, %s changes required in %s",
-             i, len(changes), source.mapid, target.mapid)
-    pprint(changes)
+def apply_pixels(target: Map, pixels: t.Iterable[MapPixel]) -> None:
     raise NotImplementedError
-    # apply changes
 
 
-def get_map_diffs(source: Map, target: Map):
-    def add_diff(category, source_value, target_value):
-        return TagDiff(category=category, path=data.path, key=data.key,
-                       source=source_value, target=target_value)
-    for data in mc.deep_walk(source):
-        src = data.tag  # source
-        if data.path[data.key] not in target:
-            # If container, should prune its whole subtree
-            yield add_diff("missing", src, None)
-            continue
-        tag = target[data.path][data.key]  # target
-        if not type(tag) == type(src):
-            yield add_diff("type", type(src), type(tag))
-            continue
-        if data.is_container:
-            if not len(tag) == len(src):
-                yield add_diff("length", len(src), len(tag))
-                continue
-        else:
-            if not tag == src:
-                yield add_diff("value", src, tag)
-                continue
-
-
-def get_duplicates(all_maps: t.Dict[int, Map]) -> t.Iterator[t.Tuple[t.Tuple, t.List[Map]]]:
+def get_duplicates(all_maps: t.Dict[int, Map]) -> t.Iterator[t.Tuple[MapKey, t.List[Map]]]:
     map_dupes = {}
     for mapitem in all_maps.values():
         map_dupes.setdefault(mapitem.key, []).append(mapitem)
