@@ -241,6 +241,25 @@ class Map(mc.File):
     __str__ = __repr__
 
 
+DiffValue: 't.TypeAlias' = t.Union[
+    # Actual type depends on category
+    mc.TagKey,  # missing
+    t.Type,     # type
+    int,        # length
+    mc.AnyTag,  # value
+]
+
+
+class TagDiff(t.NamedTuple):
+    """Hold a single difference between a source and a target"""
+    category: str         # Type of difference: missing, type, length or value
+    path:     mc.Path     # Path to source tag
+    key:      mc.TagKey   # Source tag name or index in its container
+    source:   DiffValue   # Diff value in in source. Type depends on category
+    target:   DiffValue   # Diff value in in target
+
+
+
 # -----------------------------------------------------------------------------
 # Auxiliary and Business logic functions
 
@@ -255,11 +274,11 @@ def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple['os.PathLike', mc.Root,
              world.name)
     refs = {}
     try:
-        for fspath, _, root, (tag, nbtpath, name, _) in world.walk(progress=True):
-            if not name == 'map':
+        for fspath, _, root, nbt in world.walk(progress=True):
+            if not nbt.key == 'map':
                 continue
-            refs.setdefault(int(tag), []).append((fspath, root, nbtpath[name]))
-            log.debug("%s\t%s\t%s\t%r", fspath, nbtpath, name, tag)
+            refs.setdefault(int(nbt.tag), []).append((fspath, root, nbt.path[nbt.key]))
+            log.debug("%s\t%s\t%s\t%r", fspath, nbt.path, nbt.key, nbt.tag)
     except KeyboardInterrupt:
         pass
     log.info("References found: %d",
@@ -267,87 +286,77 @@ def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple['os.PathLike', mc.Root,
     return refs
 
 
-def merge_map(source: 'Map', target: 'Map'):
-    diffs = get_map_diffs(source, target)
+def merge_map(source: Map, target: Map):
+    i = 0
+    changes: t.List[t.Tuple[int, mc.Byte]] = []
+    for i, diff in enumerate(get_map_diffs(source, target), 1):
+        if not diff.category == "value":
+            raise mc.MCError("Maps %s and %s can't be merged: %s",
+                             source.mapid, target.mapid, diff)
 
-    if not diffs:
-        print("Maps are absolutely identical!")
+        if diff.path[diff.key] == mc.Path("DataVersion"):
+            if not diff.target >= diff.source:
+                raise mc.MCError("Maps %s and %s can't be merged, target DataVersion"
+                                 " must be at least equal to source's: %s < %s [%s",
+                                 source.mapid, target.mapid, diff.source, diff.target, diff)
+            continue
+
+        if not diff.path == mc.Path("data.colors"):
+            raise mc.MCError("Maps %s and %s can't be merged, they must diverge"
+                             " only on colors data: %s",
+                             source.mapid, target.mapid, diff)
+
+        if diff.source == 0:
+            continue
+
+        if not diff.target == 0:
+            raise mc.MCError("Maps %s and %s can't be merged, conflicting values"
+                             " for the same color index: %s",
+                             source.mapid, target.mapid, diff)
+
+        changes.append((diff.key, diff.source))
+
+    if not i:
+        log.info("Maps %s and %s are absolutely identical!",
+                 source.mapid, target.mapid)
         assert source == target
         return
 
-    changes: t.List[t.Tuple[int, mc.Byte]] = []
-    for diff in diffs:
-        source, path, key, container, src, tag, category, a, kw = diff
-        path: mc.Path
-        if not category == "value":
-            raise mc.MCError("Maps %s and %s can't be merged: %s",
-                             source.mapid, target.mapid, show_diff(diff))
-
-        if path[key] == mc.Path("DataVersion"):
-            if not tag >= src:
-                raise mc.MCError("Maps %s and %s can't be merged, target DataVersion"
-                                 " must be at least equal to source's: %s < %s [%s",
-                                 source.mapid, target.mapid, tag, src, show_diff(diff))
-            continue
-
-        if not path == mc.Path("data.colors"):
-            raise mc.MCError("Maps %s and %s can't be merged, they must diverge"
-                             " only on colors data: %s",
-                             source.mapid, target.mapid, show_diff(diff))
-
-        if src == 0:
-            continue
-
-        if not tag == 0:
-            raise mc.MCError("Maps %s and %s can't be merged, conflicting values"
-                             " for the same color index: %s",
-                             source.mapid, target.mapid, show_diff(diff))
-
-        changes.append((key, src))
-
-
     if not changes:
-        print("nothing to do!")
-        for c in source[mc.Path("data.colors")]:
-            if c != 0:
-                raise Exception("pqp")
+        log.info("%s differences from %s, but no changes required in %s",
+                 i, source.mapid, target.mapid)
+        assert not any(source[mc.Path("data.colors")])
+        return
 
+    log.info("%s differences from %s, %s changes required in %s",
+             i, len(changes), source.mapid, target.mapid)
     pprint(changes)
-    print("So far so good")
-    return
+    raise NotImplementedError
+    # apply changes
 
 
-
-def get_map_diffs(source: 'Map', target: 'Map'):
-    def add_diff(category, *a, **kw):
-        diffs.append((source, path, key, container, src, tag, category, a, kw))
-    diffs = []
+def get_map_diffs(source: Map, target: Map):
+    def add_diff(category, source_value, target_value):
+        return TagDiff(category=category, path=data.path, key=data.key,
+                       source=source_value, target=target_value)
     for data in mc.deep_walk(source):
-        src, path, key, _, _, container = data[:6]
-        tag = None
-        if path[key] not in target:
-            add_diff("missing")
+        src = data.tag  # source
+        if data.path[data.key] not in target:
+            # If container, should prune its whole subtree
+            yield add_diff("missing", src, None)
             continue
-        tag = target[path][key]
+        tag = target[data.path][data.key]  # target
         if not type(tag) == type(src):
-            add_diff("type")
+            yield add_diff("type", type(src), type(tag))
             continue
-        if container:
+        if data.is_container:
             if not len(tag) == len(src):
-                add_diff("length")
+                yield add_diff("length", len(src), len(tag))
                 continue
         else:
             if not tag == src:
-                add_diff("value")
+                yield add_diff("value", src, tag)
                 continue
-    return diffs
-
-
-def show_diff(diff):
-    source, path, key, container, src, tag, category, a, kw = diff
-    return (category, source.mapid, path, key,
-            (len(src), len(tag)) if container else (src, tag),
-            a, kw)
 
 
 # Plan:
