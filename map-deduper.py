@@ -137,6 +137,17 @@ def merge(world: str, mapid: int, maps: t.List[int], **_kw):
 # -----------------------------------------------------------------------------
 # Main classes
 
+class MapKey(t.NamedTuple):
+    """Key for comparing Maps and determine duplicates"""
+    dimension: mc.Dimension
+    center:    mc.FlatPos
+    is_player: bool
+    scale:     int
+
+    def __repr__(self):
+        return f"{self.dimension.name:10} {Map.get_category(self):8} map at {self.center}"
+
+
 class Map(mc.File):
     dim_map = {
         'minecraft:overworld' : mc.OVERWORLD,
@@ -168,30 +179,34 @@ class Map(mc.File):
         return self.dim_map[self.data['dimension']]
 
     @property
-    def is_explorer(self) -> bool:
-        return self.data['unlimitedTracking'] == 1
+    def is_player(self) -> bool:
+        return self.data['unlimitedTracking'] == 0  # 1 otherwise
 
     @property
     def is_treasure(self) -> bool:
-        return self.is_explorer and self.scale == 1
+        # More efficient than category == 'Treasure', duplicates .get_category() logic
+        return not self.is_player and self.scale == 1
 
     @property
-    def maptype(self) -> str:
-        return ('Treasure' if self.is_treasure else
-                'Explorer' if self.is_explorer else
-                'Player')
+    def is_explorer(self) -> bool:
+        # More efficient than category == 'Explorer', duplicates .get_category() logic
+        return not self.is_player and self.scale == 2
+
+    @property
+    def category(self) -> str:
+        return self.get_category(self.key)
 
     @property
     def scale(self) -> int:
         return int(self.data['scale'])
 
     @property
-    def key(self) -> tuple:
-        return (
-            self.dimension.value,
-            self.center,
-            self.is_explorer,
-            self.scale,
+    def key(self) -> MapKey:
+        return MapKey(
+            dimension = self.dimension,
+            center    = self.center,
+            is_player = self.is_player,
+            scale     = self.scale,
         )
 
     @classmethod
@@ -209,13 +224,19 @@ class Map(mc.File):
         except FileNotFoundError as e:
             raise mc.MCError(f"Map {mapid} not found in world {world.name!r}: {e}")
 
-
     @classmethod
     def load_all(cls, world: mc.World) -> t.Dict[int, 'Map']:
         maps = [cls.load(path) for path in
                 pathlib.Path(world.path, 'data').glob("map_*.dat")]
         # Glob doesn't sort properly, so make sure insertion order by Map ID
         return {item.mapid: item for item in sorted(maps)}
+
+    @classmethod
+    def get_category(cls, key: MapKey):
+        return ('Player'   if key.is_player else
+                'Treasure' if key.scale == 1 else
+                'Explorer' if key.scale == 2 else
+                'Unknown')
 
     def __lt__(self, other):
         if not isinstance(other, self.__class__):
@@ -225,8 +246,8 @@ class Map(mc.File):
     def __repr__(self):
         sig = (
             f"{self.mapid:3}:"
-            f" {self.maptype:8}"
-            f" {self.dimension.name:10} {self.scale} {self.center}"
+            f" {self.dimension.name:10} {self.category:8}"
+            f" {self.scale} {self.center}"
         )
         return f"<Map {sig}>"
 
