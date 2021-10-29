@@ -23,10 +23,11 @@ https://minecraft.fandom.com/wiki/Map_item_format
 import argparse
 import logging
 import pathlib
-from pprint import pprint
+from pprint import pprint, pformat
 import sys
 import typing as t
 
+import numpy as np
 import mcworldlib as mc
 
 if t.TYPE_CHECKING:
@@ -150,9 +151,10 @@ def dedupe(world: str, **_kw) -> None:
     - For each set of duplicates, choose a suitable target and candidate sources
     - Sources are suitable candidates for merging pixels if:
         - Unreferenced (lost) in World
-        - No difference to its target besides pixels and lower or equal DataValue
-        - No conflicting pixels*
-    - Merge pixels in targets and delete sources that applied
+        - DataValue not greater than target
+        - No other difference to target besides pixels
+    - Merge maps: apply in originally blank target pixels all non-blank source ones
+    - Delete merged source maps from disk
     - "Defragmentate" maps list:
         - Find all missing map files according to idcounts.dat
         - For each missing, move next (if any) and update its references (if any)
@@ -172,6 +174,9 @@ def dedupe(world: str, **_kw) -> None:
 
     # Choose Target and Candidates
     sources : t.Dict[int, t.Tuple[Map, Map, t.List[MapPixel]]] = {}
+    # Sources ordering is important not only to select the correct target,
+    # but also to apply pixels from least to most significant source.
+    # So always loop sources by insertion order and don't re-sort it
     for dupes in dupes_map.values():
         dupes.sort(key=lambda _: (_.data_version, -_.mapid))
         target, candidates = dupes.pop(), dupes
@@ -181,10 +186,33 @@ def dedupe(world: str, **_kw) -> None:
             mergeable, pixels = can_merge(source, target)
             if mergeable:
                 sources[source.mapid] = source, target, pixels
-    pprint(sources)
+    log.debug("Mergeable sources and their targets:\n%s", pformat(sources))
 
-    refs = get_map_refs(world)
-    lost = [all_maps[mapid] for mapid in all_maps if mapid not in refs]
+    # Rule out sources with references in world
+    refs, save = get_map_refs(world)
+    if not save:
+        log.warning("World scanning aborted, changes will not be applied")
+    sources = {mapid: sources[mapid] for mapid in sources if mapid not in refs}
+
+    # Merge and delete
+    for source, target, pixels in sources.values():
+        if pixels:
+            log.info("Merging %d pixels from %s into target %s",
+                     len(pixels), source, target)
+            try:
+                apply_pixels(target, pixels)
+                assert len(get_pixels_to_apply(source, target)[0]) == 0  # Why so careful?
+            except mc.MCError as e:
+                log.error(e)
+                save = False
+            if save:
+                target.save()
+        log.info("Removing %s", source)
+        if save:
+            filename = pathlib.Path(source.filename)
+            filename.rename(filename.with_suffix(".bak"))
+
+    # Defragment
     ...
 
 
@@ -334,12 +362,14 @@ def get_all_maps(world: str):
     return Map.load_all(world=mc.load(world))
 
 
-def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple['os.PathLike', mc.Root, mc.Path]]:
+def get_map_refs(world: mc.World
+                 ) -> t.Tuple[t.Dict[int, t.Tuple['os.PathLike', mc.Root, mc.Path]], bool]:
     # Theoretically, tag type is mc.AnyTag, but as we're filtering name == "map",
     # then we know it'll only be mc.Int, as tag == mapid
     log.info("Searching Map references in %r, this might take a VERY long time...",
              world.name)
     refs = {}
+    aborted = False
     try:
         for fspath, _, root, nbt in world.walk(progress=True):
             if not nbt.key == 'map':
@@ -347,10 +377,10 @@ def get_map_refs(world: mc.World) -> t.Dict[int, t.Tuple['os.PathLike', mc.Root,
             refs.setdefault(int(nbt.tag), []).append((fspath, root, nbt.path[nbt.key]))
             log.debug("%s\t%s\t%s\t%r", fspath, nbt.path, nbt.key, nbt.tag)
     except KeyboardInterrupt:
-        pass
+        aborted = True
     log.info("References found: %d",
              sum(len(_) for _ in refs.values()))
-    return refs
+    return refs, not aborted
 
 
 def merge_map(source: Map, target: Map):
@@ -429,21 +459,24 @@ def get_pixels_to_apply(source: Map, target: Map) -> t.Tuple[t.List[MapPixel], i
                              " only on colors data: %s",
                              source.mapid, target.mapid, diff)
 
-        if diff.source == 0:
-            continue
-
-        if not diff.target == 0:
-            raise mc.MCError("Maps %s and %s can't be merged, conflicting values"
-                             " for the same color index: %s",
-                             source.mapid, target.mapid, diff)
-
-        pixels.append((diff.key, diff.source))
+        if diff.source and not diff.target:
+            pixels.append((diff.key, diff.source))
 
     return pixels, i
 
 
 def apply_pixels(target: Map, pixels: t.Iterable[MapPixel]) -> None:
-    raise NotImplementedError
+    arr = target.data['colors']
+    # NBT Arrays might be implemented by the NBT backend as read-only ndarray views
+    # If so, set the pixels in a (writeable) copy, then write back preserving original type
+    cls = None
+    if isinstance(arr, np.ndarray) and not arr.flags.writeable:
+        cls = arr.__class__
+        arr = arr.copy()
+    for pixel in pixels:
+        arr[pixel[0]] = pixel[1]
+    if cls:
+        target.data['colors'] = cls(arr)
 
 
 def get_duplicates(all_maps: t.Dict[int, Map]) -> t.Iterator[t.Tuple[MapKey, t.List[Map]]]:
