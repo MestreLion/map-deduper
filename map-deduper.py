@@ -163,12 +163,10 @@ def dedupe(world: str, **_kw) -> None:
     # Find Duplicates
     world = mc.load(world)
     log.info("De-duplicating Player maps in World %r", world.name)
-    all_maps = {k: v for k, v in Map.load_all(world).items() if v.is_player}
-    list_maps("", _all_maps=all_maps, _label="Player")
-    dupes_map = dict(get_duplicates(all_maps))
-    if dupes_map:
-        print_dupes("", _dupes_map=dupes_map)
-    else:
+    maps = {k: v for k, v in Map.load_all(world).items() if v.is_player}
+    log.debug("Player maps:\n%s", pformat(list(maps.values())))
+    dupes_map = dict(get_duplicates(maps))
+    if not dupes_map:
         log.info("No duplicate maps!")
         return
 
@@ -180,31 +178,37 @@ def dedupe(world: str, **_kw) -> None:
     for dupes in dupes_map.values():
         dupes.sort(key=lambda _: (_.data_version, -_.mapid))
         target, candidates = dupes.pop(), dupes
-        log.debug("Target %s, candidates: %s", target, candidates)
+        log.debug("Target %s, source candidates: %s", target, candidates)
         for source in candidates:
             assert source.mapid not in sources
             mergeable, pixels = can_merge(source, target)
             if mergeable:
                 sources[source.mapid] = source, target, pixels
-    log.debug("Mergeable sources and their targets:\n%s", pformat(sources))
+    if not sources:
+        log.info("No mergeable maps!")
+        return
+
+    log.info("Candidates for merging and removal:\n\t%s",
+             "\n\t".join(f"{source!r} into {target!r}, pixels to merge: {len(pixels)}"
+                         for source, target, pixels in sources.values()))
 
     # Rule out sources with references in world
+    # This is important, as we're not updating references from source to target!
     refs, save = get_map_refs(world)
     if not save:
         log.warning("World scanning aborted, changes will not be applied")
     sources = {mapid: sources[mapid] for mapid in sources if mapid not in refs}
+    if not sources:
+        log.info("All candidates maps have references in world, can only merge lost maps")
+        return
 
     # Merge and delete
     for source, target, pixels in sources.values():
         if pixels:
             log.info("Merging %d pixels from %s into target %s",
                      len(pixels), source, target)
-            try:
-                apply_pixels(target, pixels)
-                assert len(get_pixels_to_apply(source, target)[0]) == 0  # Why so careful?
-            except mc.MCError as e:
-                log.error(e)
-                save = False
+            apply_pixels(target, pixels)
+            assert len(get_pixels_to_apply(source, target)[0]) == 0  # Why so careful?
             if save:
                 target.save()
         log.info("Removing %s", source)
@@ -371,14 +375,14 @@ def get_map_refs(world: mc.World
     refs = {}
     aborted = False
     try:
-        for fspath, _, root, nbt in world.walk(progress=True):
+        for fspath, _, root, nbt in world.walk(progress=(log.level == logging.INFO)):
             if not nbt.key == 'map':
                 continue
             refs.setdefault(int(nbt.tag), []).append((fspath, root, nbt.path[nbt.key]))
             log.debug("%s\t%s\t%s\t%r", fspath, nbt.path, nbt.key, nbt.tag)
     except KeyboardInterrupt:
         aborted = True
-    log.info("References found: %d",
+    log.info("Map references found: %d",
              sum(len(_) for _ in refs.values()))
     return refs, not aborted
 
@@ -397,10 +401,11 @@ def merge_map(source: Map, target: Map):
         assert not any(source[mc.Path("data.colors")])
         return
 
-    log.info("%s differences from %s, %s changes required in %s",
-             diffs, len(changes), source.mapid, target.mapid)
-    pprint(changes)
+    log.info("%s differences from %s, %s changes required in %s: %s",
+             diffs, len(changes), source.mapid, target.mapid, pformat(changes))
     apply_pixels(target, changes)
+    assert len(get_pixels_to_apply(source, target)[0]) == 0
+    target.save()
 
 
 def get_map_diffs(source: Map, target: Map) -> t.Iterator[TagDiff]:
