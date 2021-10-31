@@ -95,12 +95,12 @@ def show_maps(world: str, maps: list, **_kw):
 def search_maps(world: str, _all_maps=None, _map_refs=None, **_kw):
     world = mc.load(world)
     all_maps = Map.load_all(world) if _all_maps is None else _all_maps
-    map_refs = get_map_refs(world) if _map_refs is None else _map_refs
-    log.info("Map references:")
+    map_refs, partial = get_map_refs(world) if _map_refs is None else _map_refs
+    log.info("Map references%s:", " (partial)" if partial else "")
     for mapitem in all_maps.values():
         print(mapitem)
-        for fs, _, nbt in map_refs.get(mapitem.mapid, []):
-            print(f"\t{fs}\t{nbt}")
+        for data in map_refs.get(mapitem.mapid, []):
+            print(f"\t{data.path}\t{data.fqtag.path[data.fqtag.key]}")
         if mapitem.mapid in map_refs:
             print()
 
@@ -108,9 +108,9 @@ def search_maps(world: str, _all_maps=None, _map_refs=None, **_kw):
 def lost_maps(world: str, _all_maps=None, _map_refs=None, **_kw):
     world = mc.load(world)
     all_maps = Map.load_all(world) if _all_maps is None else _all_maps
-    map_refs = get_map_refs(world) if _map_refs is None else _map_refs
+    map_refs, partial = get_map_refs(world) if _map_refs is None else _map_refs
     map_lost = [all_maps[mapid] for mapid in all_maps if mapid not in map_refs]
-    log.info("Lost maps:")
+    log.info("Lost maps%s:", " in partial data" if partial else "")
     pprint(map_lost)
 
 
@@ -163,7 +163,8 @@ def dedupe(world: str, **_kw) -> None:
     # Find Duplicates
     world = mc.load(world)
     log.info("De-duplicating Player maps in World %r", world.name)
-    maps = {k: v for k, v in Map.load_all(world).items() if v.is_player}
+    all_maps = Map.load_all(world)  # for defrag_maps()
+    maps = {k: v for k, v in all_maps.items() if v.is_player}
     log.debug("Player maps:\n%s", pformat(list(maps.values())))
     dupes_map = dict(get_duplicates(maps))
     if not dupes_map:
@@ -194,8 +195,8 @@ def dedupe(world: str, **_kw) -> None:
 
     # Rule out sources with references in world
     # This is important, as we're not updating references from source to target!
-    refs, save = get_map_refs(world)
-    if not save:
+    refs, partial = get_map_refs(world)
+    if partial:
         log.warning("World scanning aborted, changes will not be applied")
     sources = {mapid: sources[mapid] for mapid in sources if mapid not in refs}
     if not sources:
@@ -209,10 +210,10 @@ def dedupe(world: str, **_kw) -> None:
                      len(pixels), source, target)
             apply_pixels(target, pixels)
             assert len(get_pixels_to_apply(source, target)[0]) == 0  # Why so careful?
-            if save:
+            if not partial:
                 target.save()
         log.info("Removing %s", source)
-        if save:
+        if not partial:
             filename = pathlib.Path(source.filename)
             filename.rename(filename.with_suffix(".bak"))
 
@@ -366,8 +367,8 @@ def get_all_maps(world: str):
     return Map.load_all(world=mc.load(world))
 
 
-def get_map_refs(world: mc.World
-                 ) -> t.Tuple[t.Dict[int, t.Tuple['os.PathLike', mc.Root, mc.Path]], bool]:
+def get_map_refs(world: mc.World) -> t.Tuple[t.Dict[int, mc.FQWorldTag], bool]:
+
     # Theoretically, tag type is mc.AnyTag, but as we're filtering name == "map",
     # then we know it'll only be mc.Int, as tag == mapid
     log.info("Searching Map references in %r, this might take a VERY long time...",
@@ -375,16 +376,17 @@ def get_map_refs(world: mc.World
     refs = {}
     aborted = False
     try:
-        for fspath, _, root, nbt in world.walk(progress=(log.level == logging.INFO)):
+        for data in world.walk(progress=(log.level == logging.INFO)):
+            nbt = data.fqtag
             if not nbt.key == 'map':
                 continue
-            refs.setdefault(int(nbt.tag), []).append((fspath, root, nbt.path[nbt.key]))
-            log.debug("%s\t%s\t%s\t%r", fspath, nbt.path, nbt.key, nbt.tag)
+            refs.setdefault(int(nbt.tag), []).append(data)
+            log.debug("%s\t%s\t%s\t%r", data.path, nbt.path, nbt.key, nbt.tag)
     except KeyboardInterrupt:
         aborted = True
     log.info("Map references found: %d",
              sum(len(_) for _ in refs.values()))
-    return refs, not aborted
+    return refs, aborted
 
 
 def merge_map(source: Map, target: Map):
