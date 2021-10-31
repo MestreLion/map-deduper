@@ -569,7 +569,9 @@ def defrag_maps(
     update_idcounts(world, maxid, partial)
 
 
-def update_idcounts(world, mapid, partial=False):
+def update_idcounts(world, mapid, partial=False, **kw):
+    if isinstance(world, str):
+        world = mc.load(world)
     idcounts = mc.load_dat(pathlib.Path(world.path).joinpath('data/idcounts.dat'))
     maxid_path = mc.Path("data.map")
     old_maxid = idcounts[maxid_path]
