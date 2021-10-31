@@ -71,6 +71,9 @@ def parse_args(args=None):
                         parents=[mapid, maps]).set_defaults(f=merge)
     commands.add_parser('dedupe', help="De-duplicate all maps in world").set_defaults(f=dedupe)
     commands.add_parser('defrag', help="Defragmentate world maps list").set_defaults(f=defrag)
+    commands.add_parser('idcounts', help="Update idcounts.dat with a given map ID",
+                        parents=[mapid]).set_defaults(f=update_idcounts)
+
 
     return parser.parse_args(args)
 
@@ -218,8 +221,8 @@ def dedupe(world: str, **_kw) -> None:
             filename = pathlib.Path(source.filename)
             filename.rename(filename.with_suffix(".bak"))
 
-    # Defragment
-    defrag_maps(world, all_maps=all_maps, all_refs=refs, partial_refs=partial)
+    # Defragment - intentionally don't share all_maps to force re-scan
+    defrag_maps(world, all_maps=None, all_refs=refs, partial_refs=partial)
 
 
 def defrag(world: str, _world: mc.World = None, _all_maps=None, _map_refs=None, **_kw):
@@ -525,7 +528,8 @@ def defrag_maps(
     maxid = len(maps) - 1
     log.info("New ID in idcounts.dat: %s", maxid)
     if not shift:
-        update_idcounts(world, maxid)
+        update_idcounts(world, maxid, partial=False)
+        return
 
     # Update references
     refs, partial = get_map_refs(world) if all_refs is None else (all_refs, partial_refs)
@@ -540,14 +544,15 @@ def defrag_maps(
                  len(refs[source]), source, target)
         for ref in refs[source]:
             files[ref.obj.filename] = ref.obj
-            parent, key = ref.fqtag.parent, ref.fqtag.key
-            log.info("%s/%s = %s -> %s",
-                     ref.path, ref.fqtag.path[key], parent[key], target)
+            parent, key, value = ref.fqtag.parent, ref.fqtag.key, ref.fqtag.tag
+
+            log.info("\t%s/%s = %s -> %s",
+                     ref.path, ref.fqtag.path[key], value, target)
             if not partial:
-                parent[key] = target
+                parent[key] = value.__class__(target)  # mc.Int(target)
 
     # Save changed regions
-    log.info("Files to save:\n%s", "\n\t".join(repr(_) for _ in files.items()))
+    # log.info("Files to save:\n%s", "\n\t".join(repr(_) for _ in files.items()))
     for filename, obj in files.items():
         log.info("Saving file %r: %r", filename, obj)
         if not partial:
@@ -564,16 +569,16 @@ def defrag_maps(
     update_idcounts(world, maxid, partial)
 
 
-def update_idcounts(world, maxid, partial=True):
+def update_idcounts(world, mapid, partial=False):
     idcounts = mc.load_dat(pathlib.Path(world.path).joinpath('data/idcounts.dat'))
     maxid_path = mc.Path("data.map")
     old_maxid = idcounts[maxid_path]
-    if old_maxid == maxid:
+    if old_maxid == mapid:
         log.info("No adjustments are needed in idcounts.dat")
         return
 
-    log.info("idcounts.dat: %s -> %s", old_maxid, maxid)
-    idcounts[maxid_path] = maxid
+    log.info("idcounts.dat: %s -> %s", old_maxid, mapid)
+    idcounts[maxid_path] = idcounts[maxid_path].__class__(mapid)  # mc.Int
     log.info("Saving %s", idcounts.filename)
     if not partial:
         idcounts.save()
