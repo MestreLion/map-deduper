@@ -70,6 +70,7 @@ def parse_args(args=None):
     commands.add_parser('merge',  help="Merge into a target map data from other maps",
                         parents=[mapid, maps]).set_defaults(f=merge)
     commands.add_parser('dedupe', help="De-duplicate all maps in world").set_defaults(f=dedupe)
+    commands.add_parser('defrag', help="Defragmentate world maps list").set_defaults(f=defrag)
 
     return parser.parse_args(args)
 
@@ -218,7 +219,12 @@ def dedupe(world: str, **_kw) -> None:
             filename.rename(filename.with_suffix(".bak"))
 
     # Defragment
-    ...
+    defrag_maps(world, maps=all_maps, refs=refs)
+
+
+def defrag(world: str, _world=None, _all_maps=None, _map_refs=None, **_kw):
+    world = mc.load(world) if _world is None else world
+    defrag_maps(world, maps=_all_maps, refs=_map_refs)
 
 
 # -----------------------------------------------------------------------------
@@ -493,6 +499,32 @@ def get_duplicates(all_maps: t.Dict[int, Map]) -> t.Iterator[t.Tuple[MapKey, t.L
     for key, dupes in map_dupes.items():
         if len(dupes) > 1:
             yield key, dupes
+
+
+def defrag_maps(world: mc.World, maps=None, refs=None):
+    """Move map files to missing IDs and update idcounts.dat, updating World references
+        - Find all missing map files according to idcounts.dat
+        - For each missing, move next (if any) and update its references (if any)
+        - Update final idcounts.dat
+    """
+    maps = Map.load_all(world) if maps is None else maps
+    shift_map = {m: i for i, m in enumerate(maps) if i < m}
+    log.info("Maps to shift:\n\t%s",
+             "\n\t".join(f"{k} -> {v}" for k, v in shift_map.items()))
+    maxid = len(maps) - 1
+    log.info("New ID in idcounts.dat: %s", maxid)
+
+    if shift_map:
+        refs, partial = get_map_refs(world) if refs is None else refs
+
+
+    idcounts = mc.load_dat(pathlib.Path(world.path).joinpath('data/idcounts.dat'))
+    maxid_path = mc.Path("data.map")
+    old_maxid = idcounts[maxid_path]
+    if old_maxid == maxid:
+        log.info("No adjustments are needed in idcounts.dat")
+    else:
+        log.info("idcounts.dat: %s -> %s", old_maxid, maxid)
 
 
 if __name__ == "__main__":
