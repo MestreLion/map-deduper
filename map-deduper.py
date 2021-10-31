@@ -31,7 +31,7 @@ import numpy as np
 import mcworldlib as mc
 
 if t.TYPE_CHECKING:
-    import os
+    ...
 
 log = logging.getLogger(__name__)
 AllMaps: 't.TypeAlias' = t.Dict[int, 'Map']
@@ -219,12 +219,12 @@ def dedupe(world: str, **_kw) -> None:
             filename.rename(filename.with_suffix(".bak"))
 
     # Defragment
-    defrag_maps(world, maps=all_maps, refs=refs)
+    defrag_maps(world, all_maps=all_maps, all_refs=refs, partial_refs=partial)
 
 
-def defrag(world: str, _world=None, _all_maps=None, _map_refs=None, **_kw):
-    world = mc.load(world) if _world is None else world
-    defrag_maps(world, maps=_all_maps, refs=_map_refs)
+def defrag(world: str, _world: mc.World = None, _all_maps=None, _map_refs=None, **_kw):
+    world = mc.load(world) if _world is None else _world
+    defrag_maps(world, all_maps=_all_maps, all_refs=_map_refs)
 
 
 # -----------------------------------------------------------------------------
@@ -310,19 +310,23 @@ class Map(mc.File):
         return self
 
     @classmethod
+    def path_by_id(cls, mapid: int, world: mc.World):
+        return pathlib.Path(world.path, f'data/map_{mapid}.dat')
+
+    @classmethod
     def load_by_id(cls, mapid: int, world: mc.World, *args, **kwargs) -> 'Map':
         try:
-            return cls.load(pathlib.Path(world.path, f'data/map_{mapid}.dat'),
-                            *args, **kwargs)
+            return cls.load(cls.path_by_id(mapid, world=world), *args, **kwargs)
         except FileNotFoundError as e:
             raise mc.MCError(f"Map {mapid} not found in world {world.name!r}: {e}")
 
     @classmethod
     def load_all(cls, world: mc.World) -> t.Dict[int, 'Map']:
-        maps = [cls.load(path) for path in
-                pathlib.Path(world.path, 'data').glob("map_*.dat")]
+        maps: t.List['Map'] = [cls.load(path) for path in
+                               pathlib.Path(world.path, 'data').glob("map_*.dat")]
         # Glob doesn't sort properly, so make sure insertion order by Map ID
-        return {item.mapid: item for item in sorted(maps)}
+        all_maps: t.Dict[int, 'Map'] = {item.mapid: item for item in sorted(maps)}
+        return all_maps
 
     @classmethod
     def get_category(cls, key: MapKey):
@@ -362,8 +366,8 @@ class TagDiff(t.NamedTuple):
     category: str         # Type of difference: missing, type, length or value
     path:     mc.Path     # Path to source tag
     key:      mc.TagKey   # Source tag name or index in its container
-    source:   DiffValue   # Diff value in in source. Type depends on category
-    target:   DiffValue   # Diff value in in target
+    source:   DiffValue   # Diff value in source. Type depends on category
+    target:   DiffValue   # Diff value in target
 
 
 # -----------------------------------------------------------------------------
@@ -373,16 +377,15 @@ def get_all_maps(world: str):
     return Map.load_all(world=mc.load(world))
 
 
-def get_map_refs(world: mc.World) -> t.Tuple[t.Dict[int, mc.FQWorldTag], bool]:
-
+def get_map_refs(world: mc.World) -> t.Tuple[t.Dict[int, t.List[mc.FQWorldTag]], bool]:
     # Theoretically, tag type is mc.AnyTag, but as we're filtering name == "map",
     # then we know it'll only be mc.Int, as tag == mapid
     log.info("Searching Map references in %r, this might take a VERY long time...",
              world.name)
-    refs = {}
+    refs: t.Dict[int, t.List[mc.FQWorldTag]] = {}
     aborted = False
     try:
-        for data in world.walk(progress=(log.level == logging.INFO)):
+        for data in world.walk(progress=(logging.getLogger().level == logging.INFO)):
             nbt = data.fqtag
             if not nbt.key == 'map':
                 continue
@@ -493,7 +496,7 @@ def apply_pixels(target: Map, pixels: t.Iterable[MapPixel]) -> None:
 
 
 def get_duplicates(all_maps: t.Dict[int, Map]) -> t.Iterator[t.Tuple[MapKey, t.List[Map]]]:
-    map_dupes = {}
+    map_dupes: t.Dict[MapKey, t.List[Map]] = {}
     for mapitem in all_maps.values():
         map_dupes.setdefault(mapitem.key, []).append(mapitem)
     for key, dupes in map_dupes.items():
@@ -501,30 +504,80 @@ def get_duplicates(all_maps: t.Dict[int, Map]) -> t.Iterator[t.Tuple[MapKey, t.L
             yield key, dupes
 
 
-def defrag_maps(world: mc.World, maps=None, refs=None):
+def defrag_maps(
+    world: mc.World,
+    all_maps: t.Dict[int, Map] = None,
+    all_refs: t.Dict[int, t.List[mc.FQWorldTag]] = None,
+    partial_refs: bool = True
+):
     """Move map files to missing IDs and update idcounts.dat, updating World references
         - Find all missing map files according to idcounts.dat
         - For each missing, move next (if any) and update its references (if any)
         - Update final idcounts.dat
     """
-    maps = Map.load_all(world) if maps is None else maps
-    shift_map = {m: i for i, m in enumerate(maps) if i < m}
+    refs: t.Dict[int, t.List[mc.FQWorldTag]]
+    maps: t.Dict[int, Map] = Map.load_all(world) if all_maps is None else all_maps
+
+    # Get maps to shift
+    shift: t.Dict[int, int] = {m: i for i, m in enumerate(maps) if i < m}
     log.info("Maps to shift:\n\t%s",
-             "\n\t".join(f"{k} -> {v}" for k, v in shift_map.items()))
+             "\n\t".join(f"{k} -> {v}" for k, v in shift.items()))
     maxid = len(maps) - 1
     log.info("New ID in idcounts.dat: %s", maxid)
+    if not shift:
+        update_idcounts(world, maxid)
 
-    if shift_map:
-        refs, partial = get_map_refs(world) if refs is None else refs
+    # Update references
+    refs, partial = get_map_refs(world) if all_refs is None else (all_refs, partial_refs)
+    if partial:
+        log.warning("World scanning aborted, changes will not be applied")
+    files: t.Dict[mc.AnyPath, t.Union[mc.RegionFile, mc.Level]] = {}
+    for source, target in shift.items():
+        if source not in refs:
+            log.info("No references for map %s", source)
+            continue
+        log.info("Updating %s references for map %s -> %s",
+                 len(refs[source]), source, target)
+        for ref in refs[source]:
+            files[ref.obj.filename] = ref.obj
+            parent, key = ref.fqtag.parent, ref.fqtag.key
+            log.info("%s/%s = %s -> %s",
+                     ref.path, ref.fqtag.path[key], parent[key], target)
+            if not partial:
+                parent[key] = target
+
+    # Save changed regions
+    log.info("Files to save:\n%s", "\n\t".join(repr(_) for _ in files.items()))
+    for filename, obj in files.items():
+        log.info("Saving file %r: %r", filename, obj)
+        if not partial:
+            obj.save()
+
+    # Shift map files
+    for source, target in shift.items():
+        source_path = Map.path_by_id(source, world=world)
+        target_path = Map.path_by_id(target, world=world)
+        log.info("Moving file %r -> %r", source_path, target_path.name)
+        if not partial:
+            source_path.rename(target_path)
+
+    update_idcounts(world, maxid, partial)
 
 
+def update_idcounts(world, maxid, partial=True):
     idcounts = mc.load_dat(pathlib.Path(world.path).joinpath('data/idcounts.dat'))
     maxid_path = mc.Path("data.map")
     old_maxid = idcounts[maxid_path]
     if old_maxid == maxid:
         log.info("No adjustments are needed in idcounts.dat")
-    else:
-        log.info("idcounts.dat: %s -> %s", old_maxid, maxid)
+        return
+
+    log.info("idcounts.dat: %s -> %s", old_maxid, maxid)
+    idcounts[maxid_path] = maxid
+    log.info("Saving %s", idcounts.filename)
+    if not partial:
+        idcounts.save()
+
 
 
 if __name__ == "__main__":
